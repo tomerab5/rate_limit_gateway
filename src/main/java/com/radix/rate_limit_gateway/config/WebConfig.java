@@ -15,8 +15,10 @@ public class WebConfig implements WebMvcConfigurer {
     }
 
     @Override
+    //Run HeaderValidationInterceptor for every request whose path starts with /api/
+    //Like app.use("/api", headerValidationMiddleware) in Express
     public void addInterceptors(InterceptorRegistry registry) {
         registry.addInterceptor(headerValidationInterceptor)
-                .addPathPatterns("/api/**");
+                .addPathPatterns("/api/**");  
     }
 }

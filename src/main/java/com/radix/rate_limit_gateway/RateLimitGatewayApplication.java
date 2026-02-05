@@ -10,7 +10,7 @@ import org.springframework.boot.autoconfigure.SpringBootApplication;
 public class RateLimitGatewayApplication {
 
 	public static void main(String[] args) {
-		SpringApplication.run(RateLimitGatewayApplication.class, args);
+		SpringApplication.run(RateLimitGatewayApplication.class, args);   //app.listen(8081) in Express
 	}
 
 }

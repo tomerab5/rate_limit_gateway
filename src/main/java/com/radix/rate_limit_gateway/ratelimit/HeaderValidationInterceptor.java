@@ -12,6 +12,7 @@ import java.io.IOException;
 public class HeaderValidationInterceptor implements HandlerInterceptor {
 
     @Override
+    //middleare
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,
                              Object handler) throws IOException {
@@ -28,11 +29,11 @@ public class HeaderValidationInterceptor implements HandlerInterceptor {
             return false; // STOP request
         }
 
-        return true; // CONTINUE to controller
+        return true; // CONTINUE to controller. Like next() in Express
     }
 
     private boolean isBlank(String s) {
-        return s == null || s.trim().isEmpty();
+        return s == null || s.trim().isEmpty();  //treats an empty string ("") ass missing
     }
 
     private void writeJson400(HttpServletResponse response, ApiError error) throws IOException {

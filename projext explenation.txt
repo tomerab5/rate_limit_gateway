@@ -1,0 +1,8 @@
+# Rate Limiting Gateway
+
+A Spring Boot–based gateway service that enforces per-tenant and per-API-key rate limits in front of protected endpoints.
+
+The service supports configurable quota rules, persistent rate-limit state, and guaranteed audit logging for blocked requests.  
+It is designed as an internal gateway component to prevent individual tenants or API keys from overwhelming backend services.
+
+This project was implemented as part of a take-home full-stack assignment, with an emphasis on correctness, clarity, and production-ready design.

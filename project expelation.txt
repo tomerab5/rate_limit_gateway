@@ -1,0 +1,111 @@
+Radix Technologies Ltd.
+Home Exercise
+Rate Limiting Gateway + Quotas (Java / Spring Boot)
+This exercise is designed for an AI coding agent to build, run, and debug software.
+Submission will be evaluated by running automated tests and an end-to-end curl script.
+Please read all requirements before you start.
+1. Scenario & Overview
+Imagine you are building an internal gateway service in front of multiple backend endpoints. The
+gateway must enforce per-tenant rate limits so that a single tenant or API key cannot overload the
+system.
+You will implement a Spring Boot service that exposes at least two protected endpoints and enforces
+rate limits/quota rules per (tenantId, apiKey, method, path). When a request is blocked (HTTP 429), the
+system must record an audit event locally. Optionally, you can also export audit files to S3.
+This is intentionally sized so that completing it in the timebox realistically requires an AI coding agent
+that can compile, run tests, and help you iterate quickly.
+2. AI Agent Usage (Required)
+Important: Using an AI coding agent is part of the exercise, not a shortcut.
+Your repository must include a README.md section called “AI Agent & Setup” describing:
+• Which agent/tool you used (name, and version if you know it).
+• Your local setup (OS, Java version, build tool, and how you invoked the agent).
+• Any prompting/strategy notes (short bullet points are fine).
+It is important to provide an evidence that you ran the build/tests repeatedly and used the agent in a
+feedback loop to reach a working system.
+3. Functional Requirements
+3.1 Protected API
+Expose at least two protected endpoints to demonstrate different limits, for example:
+• GET /api/data
+• POST /api/data
+Every request to protected endpoints must include these headers:
+• X-Tenant-Id: <tenant>
+• X-Api-Key: <key>
+If any header is missing or empty, return HTTP 400 with a clear JSON error message.
+3.2 Rate Limiting as Middleware
+Enforcement must happen before the controller logic (Filter, HandlerInterceptor, or equivalent). When
+blocked, return HTTP 429 with a JSON body that includes at least: error code, rule identifier, and retryafter
+seconds.
+Open decision: Choose ONE rate-limiting algorithm and implement it end-to-end. Document your choice
+and why in README.md.
+• Option A: Token Bucket (recommended if you want smooth limiting)
+• Option B: Fixed Window or Sliding Window counters (simpler, but watch edge cases)
+3.3 Admin API for Quota Rules
+Provide an admin API to create/update/read/delete limits stored in the database.
+APIs: Minimum required endpoints:
+• PUT /admin/limits (create or update a rule)
+• GET /admin/limits?tenantId=... (list rules for a tenant)
+• DELETE /admin/limits/{id}
+Each rule must at minimum define: tenantId, apiKey, HTTP method, path, limit, windowSeconds.
+You must demonstrate two different rules (e.g., different limits for GET vs POST) so that your tests and
+curl script have both positive and negative cases.
+Alternatively, limits may be configured by an admin via a configuration file (not necessarily through an
+admin API). In any case, as long as the rate-limit parameters are configurable, authorization and
+authentication for admin vs. non-admin users are out of scope for this exercise.
+3.4 Persistence
+Use a real database or local file for persistency of the server state and/or configuration.
+You must persist:
+• Rate limit rules/policies
+• State required by your chosen algorithm (counters/tokens, timestamps, etc.)
+• Audit events for blocked requests (see section 4)
+4. Auditing
+4.1 Local Audit (Required)
+For every blocked request (HTTP 429), write an audit event to a database table (or equivalent persistent
+store). This must be transactional with the decision to block (i.e., if you return 429, the audit must exist).
+Minimum audit fields:
+• timestamp (UTC)
+• tenantId
+• apiKey (plain text or hashed - your choice; document it)
+• method and path
+• ruleId (or enough to identify the rule)
+• clientIp (best effort)
+• decision = BLOCKED
+• remaining/retryAfter/windowSeconds (whatever is relevant for your algorithm)
+4.2 Optional: Export Audit Files to S3
+Optional but recommended: implement an exporter that uploads audit logs to S3 as files. If you do not
+implement S3 export, your solution can still pass as long as local audit + tests + curl script succeed.
+If you implement S3 export, do it reliably using an outbox-style approach:
+• On 429: write audit events to an outbox table (or mark local audit records as pending).
+• A background worker periodically uploads pending records to S3 and marks them as exported.
+• If S3 is temporarily unavailable, events must not be lost; they should be retried.
+Open decision: Choose ONE export strategy and document it in README.md. Implement what you
+choose:
+• Option A: One object per audit event (simplest, more S3 calls)
+• Option B: Batch upload as JSONL (recommended) - e.g., every N events or every T seconds
+If batching, choose and document your S3 key structure (prefix). Example:
+audit/tenantId/YYYY/MM/DD/HH/<file>.jsonl
+4.3 S3 Details (Credentials will be sent separately)
+If you implement S3 export, use the following bucket and region. Credentials will be shared via a
+separate secure channel; do not commit credentials to the repository.
+S3 Bucket radix-interview-bucket
+Region eu-west-1 (Ireland)
+Access Key ID AKIA****************
+Secret Access Key ********************************
+Your code must read AWS credentials from environment variables or AWS profiles (standard AWS SDK
+behavior).
+5. Testing (Required)
+Your solution must be verifiable via automated tests and a simple end-to-end script.
+Create scripts/e2e.sh - a bash script that exercises your running service using curl and fails fast on errors
+(non-zero exit code).
+The script must perform positive and negative tests for EACH rule you configure:
+• Configure rule A via the admin API; send N requests expecting 200; then send additional requests
+expecting 429.
+• Configure rule B (different endpoint or method); repeat the same pattern.
+Open decision: Choose how your script validates HTTP status codes. Recommended: use curl -s -o
+/dev/null -w '%{http_code}' and compare expected codes.
+6. Deliverables
+Repository: Submit a Git repository containing:
+• Spring Boot project (buildable with ./mvnw package)
+• End-to-end test scripts (e2e.sh)
+• README.md with:
+• How to run locally
+• AI Agent & Setup (required)
+• Decisions you made for the open decision points (algorithm/export/script)

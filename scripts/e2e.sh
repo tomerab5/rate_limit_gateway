@@ -6,7 +6,9 @@ TENANT_PREFIX="${TENANT_PREFIX:-e2e}"
 MANAGE_APP="${MANAGE_APP:-0}"
 APP_JAR="${APP_JAR:-target/rate-limit-gateway-0.0.1-SNAPSHOT.jar}"
 APP_PORT="${APP_PORT:-8081}"
-APP_DB_URL="${APP_DB_URL:-jdbc:h2:file:./data/e2e-verify}"
+SCRIPT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+DEFAULT_APP_DB_URL="jdbc:h2:file:${SCRIPT_DIR}/data/e2e-verify;WRITE_DELAY=0"
+APP_DB_URL="${APP_DB_URL:-$DEFAULT_APP_DB_URL}"
 
 PASS() { echo "PASS: $*"; }
 FAIL() { echo "FAIL: $*" >&2; exit 1; }

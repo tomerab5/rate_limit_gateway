@@ -85,7 +85,7 @@ public class RateLimitService {
                     state.setRequestCount(state.getRequestCount() + 1);
                 }
 
-                stateRepository.save(state);
+                stateRepository.saveAndFlush(state);
 
                 windowEnd = state.getWindowStartEpochSeconds() + appliedRule.windowSeconds;
 

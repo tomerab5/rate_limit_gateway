@@ -1,25 +1,52 @@
 # Rate Limiting Gateway
 
-Spring Boot gateway service that enforces per-tenant/per-key quotas before protected controller logic.
+Spring Boot gateway that enforces per-tenant/per-key quotas on protected APIs, persists limiter state, and audits blocked requests.
 
-## Table of Contents
+## Contents
 
-- [0. Quick Start (60 Seconds)](#0-quick-start-60-seconds)
-- [1. Project Overview](#1-project-overview)
-- [2. Assignment Coverage](#2-assignment-coverage)
-- [3. System Architecture](#3-system-architecture)
-- [4. Rate Limiting Model](#4-rate-limiting-model)
-- [5. Data Model](#5-data-model)
-- [6. API Reference](#6-api-reference)
-- [7. Local Development](#7-local-development)
-- [8. Build, Test, and Verification](#8-build-test-and-verification)
-- [9. Troubleshooting](#9-troubleshooting)
-- [10. Decisions and Tradeoffs](#10-decisions-and-tradeoffs)
-- [11. Known Limitations](#11-known-limitations)
-- [12. AI Agent & Setup](#12-ai-agent--setup)
-- [13. Additional Documentation](#13-additional-documentation)
+1. Overview
+2. Quick Start
+3. Assignment Coverage
+4. Architecture and Flow
+5. API Summary
+6. Persistence Model
+7. Build and Verification
+8. Script Reference
+9. One-Command Reviewer Check
+10. Scoring Evidence
+11. Configuration
+12. Troubleshooting
+13. Design Decisions
+14. Known Limitations
+15. AI Agent & Setup
+16. Additional Docs
 
-## 0. Quick Start (60 Seconds)
+## 1. Overview
+
+Protected endpoints:
+
+- `GET /api/data`
+- `POST /api/data`
+
+Required headers on protected endpoints:
+
+- `X-Tenant-Id`
+- `X-Api-Key`
+
+Rate limit identity tuple:
+
+- `(tenantId, apiKey, method, path)`
+
+When over limit:
+
+- Returns `429`
+- Includes `Retry-After` response header
+- Returns JSON with `errorCode`, `ruleId`, `retryAfterSeconds`
+- Persists audit event (`decision=BLOCKED`)
+
+## 2. Quick Start
+
+### Linux/macOS
 
 ```bash
 ./mvnw test
@@ -27,7 +54,15 @@ Spring Boot gateway service that enforces per-tenant/per-key quotas before prote
 ./mvnw spring-boot:run
 ```
 
-In a second terminal:
+### Windows (PowerShell)
+
+```powershell
+.\mvnw.cmd test
+.\mvnw.cmd package
+.\mvnw.cmd spring-boot:run
+```
+
+Quick request check:
 
 ```bash
 curl -i http://localhost:8081/api/data -H "X-Tenant-Id: t1" -H "X-Api-Key: k1"
@@ -35,146 +70,53 @@ curl -i http://localhost:8081/api/data -H "X-Tenant-Id: t1" -H "X-Api-Key: k1"
 
 Expected: HTTP `200` with JSON body containing `"ok": true`.
 
-## 1. Project Overview
+## 3. Assignment Coverage
 
-This service protects backend endpoints by enforcing rate limits per request identity tuple:
-
-`(tenantId, apiKey, method, path)`
-
-Protected endpoints:
-
-- `GET /api/data`
-- `POST /api/data`
-
-Required request headers:
-
-- `X-Tenant-Id`
-- `X-Api-Key`
-
-When a request is blocked, service returns HTTP `429` and stores an audit event in persistent storage.
-
-## 2. Assignment Coverage
-
-| Requirement | Status | Notes |
+| Requirement | Status | Where |
 |---|---|---|
-| Protected API with at least two endpoints | Done | `GET /api/data`, `POST /api/data` ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#1-protected-api-and-headers)) |
-| Missing headers return `400` JSON | Done | Enforced in interceptor ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#1-protected-api-and-headers)) |
-| Rate limiting as middleware/interceptor | Done | `HeaderValidationInterceptor` ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#2-rate-limiting-middleware-and-429-body)) |
-| `429` body includes code, rule id, retry | Done | `errorCode`, `ruleId`, `retryAfterSeconds` ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#2-rate-limiting-middleware-and-429-body)) |
-| Admin API for quota CRUD | Done | `PUT/GET/DELETE /admin/limits` ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#3-admin-api-for-limits)) |
-| Persistence for rules and state | Done | File-based H2 ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#4-persistence-of-rules-state-and-audit)) |
-| Local audit for blocked requests | Done | `audit_events` table ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#5-auditing-on-blocked-requests)) |
-| Automated tests + E2E script | Done | JUnit + `scripts/e2e.sh` ([traceability](docs/ASSIGNMENT_TRACEABILITY.md#7-testing-and-e2e-script)) |
-| S3 export | Optional, not implemented | Not required for pass |
+| Two protected endpoints | Done | `GET /api/data`, `POST /api/data` |
+| Missing/blank headers => `400` JSON | Done | `HeaderValidationInterceptor` |
+| Middleware enforcement before controller | Done | `HandlerInterceptor` on `/api/**` |
+| `429` includes code/rule/retry | Done | `HeaderValidationInterceptor` + `RateLimitService` |
+| Admin limit CRUD | Done | `PUT/GET/DELETE /admin/limits` |
+| Persist rules + limiter state + audit | Done | H2 file DB entities/repositories |
+| Blocked request audit (transactional with decision) | Done | `RateLimitService.check(...)` transaction |
+| Automated tests + E2E script | Done | JUnit + `scripts/e2e.sh` |
+| S3 export | Optional (not implemented) | Out of scope by choice |
 
-## 3. System Architecture
+Detailed mapping: `docs/ASSIGNMENT_TRACEABILITY.md`.
 
-High-level request flow:
+## 4. Architecture and Flow
 
-1. Client calls `/api/**` with headers.
+Request path:
+
+1. Request enters `/api/**`.
 2. `HeaderValidationInterceptor` validates required headers.
 3. Interceptor calls `RateLimitService.check(...)`.
-4. `RateLimitService` resolves best matching rule from DB.
-5. Service updates persistent counter state in transaction.
-6. If over limit:
-- persist audit event (`decision=BLOCKED`)
-- return `429` with retry details.
+4. Service resolves best matching rule from DB (`exact` and `*` wildcard support).
+5. Service updates persistent fixed-window state.
+6. If blocked, service writes audit row and interceptor returns `429`.
 7. If allowed, request reaches controller.
 
-See detailed architecture notes and component responsibilities in `docs/ARCHITECTURE.md`.
+Core classes:
 
-Architecture flow diagram:
+- `src/main/java/com/radix/rate_limit_gateway/ratelimit/HeaderValidationInterceptor.java`
+- `src/main/java/com/radix/rate_limit_gateway/ratelimit/RateLimitService.java`
+- `src/main/java/com/radix/rate_limit_gateway/admin/AdminLimitsController.java`
+- `src/main/java/com/radix/rate_limit_gateway/admin/AdminAuditController.java`
 
-```mermaid
-flowchart TD
-    A[Client Request /api/**] --> B[HeaderValidationInterceptor]
-    B --> C{Headers Valid?}
-    C -- No --> D[Return 400 JSON]
-    C -- Yes --> E[RateLimitService.check]
-    E --> F[Resolve rule from rate_limit_rules]
-    F --> G[Update rate_limit_states in transaction]
-    G --> H{Within limit?}
-    H -- Yes --> I[Controller /api/data]
-    I --> J[Return 200]
-    H -- No --> K[Insert audit_events BLOCKED]
-    K --> L[Return 429 + Retry-After]
-```
-
-## 4. Rate Limiting Model
-
-Algorithm: **Fixed Window**.
-
-Rule fields:
-
-- `tenantId`
-- `apiKey`
-- `method`
-- `path`
-- `limit`
-- `windowSeconds`
-
-Matching supports exact and wildcard (`*`) values for `apiKey`, `method`, and `path`.
-
-Rule selection behavior:
-
-- Filter rules by tenant and wildcard/exact match.
-- Choose highest specificity (exact matches outrank wildcard matches).
-- If no configured rule matches, fallback default applies: `5 requests / 60 seconds`.
-
-Concurrency behavior:
-
-- Per effective key lock (`tenantId|apiKey|method|path`) prevents over-allow races.
-- State update and audit write happen inside the same transaction callback.
-
-## 5. Data Model
-
-Persistent tables (JPA entities):
-
-- `rate_limit_rules`: configurable quota rules.
-- `rate_limit_states`: fixed-window counters and window start timestamps.
-- `audit_events`: blocked request audit trail.
-
-See table-level field documentation in `docs/ARCHITECTURE.md`.
-
-## 6. API Reference
-
-Full request/response examples are in `docs/API.md`.
-
-Quick summary:
-
-### Endpoint Status Matrix
+## 5. API Summary
 
 | Endpoint | Method | Success | Common errors |
 |---|---|---|---|
 | `/api/data` | `GET` | `200` | `400`, `429` |
 | `/api/data` | `POST` | `200` | `400`, `429` |
-| `/admin/limits` | `PUT` | `200` | `400`, `404` (id update target missing) |
+| `/admin/limits` | `PUT` | `200` | `400`, `404` |
 | `/admin/limits` | `GET` | `200` | `400` |
 | `/admin/limits/{id}` | `DELETE` | `204` | `404` |
-| `/admin/audit` | `GET` | `200` | `400` (invalid `limit`) |
+| `/admin/audit` | `GET` | `200` | `400` |
 
-### Protected endpoints
-
-- `GET /api/data`
-- `POST /api/data`
-
-Missing headers:
-
-- Status: `400`
-- Body:
-
-```json
-{
-  "errorCode": "MISSING_HEADER",
-  "message": "X-Tenant-Id is required"
-}
-```
-
-Rate-limited:
-
-- Status: `429`
-- Header: `Retry-After: <seconds>`
-- Body:
+Example rate-limited response body:
 
 ```json
 {
@@ -185,80 +127,30 @@ Rate-limited:
 }
 ```
 
-### Admin endpoints
+Full examples: `docs/API.md`.
 
-- `PUT /admin/limits`
-- `GET /admin/limits?tenantId=...`
-- `DELETE /admin/limits/{id}`
-- `GET /admin/audit?tenantId=...&limit=...`
+## 6. Persistence Model
 
-## 7. Local Development
+Storage: file-based H2 database.
 
-Prerequisites:
+Entities:
 
-- Java 17+
-- Bash and curl (for E2E scripts)
-- On Windows, run E2E scripts via Git Bash or WSL
+- `rate_limit_rules` (rule configuration)
+- `rate_limit_states` (fixed-window counters/window start)
+- `audit_events` (blocked decision audit trail)
 
-Start service:
-
-```bash
-./mvnw spring-boot:run
-```
-
-PowerShell:
-
-```powershell
-.\mvnw.cmd spring-boot:run
-```
-
-Default port: `8081`.
-
-Database configuration (runtime):
+Runtime defaults:
 
 - `spring.datasource.url=jdbc:h2:file:./data/rate-limit-gateway`
-- `app.seed-default-rules.enabled=false` (clean startup by default)
+- `spring.jpa.hibernate.ddl-auto=update`
 
-This persists rules and counters across restarts.
-If you want sample startup rules for local demos, set `app.seed-default-rules.enabled=true`.
+Managed E2E restart persistence uses script-local absolute DB path in `scripts/e2e.sh`, with `WRITE_DELAY=0` for stable restart behavior.
 
-## 8. Build, Test, and Verification
+## 7. Build and Verification
 
-Run tests:
+Recommended reviewer commands:
 
-```bash
-./mvnw test
-```
-
-Build artifact:
-
-```bash
-./mvnw package
-```
-
-Run E2E against existing running service:
-
-```bash
-bash scripts/e2e.sh
-```
-
-Run managed restart persistence checks:
-
-```bash
-MANAGE_APP=1 bash scripts/e2e.sh
-```
-
-Dedicated persistence script:
-
-```bash
-bash scripts/e2e_persistence.sh
-```
-
-See full test strategy in `docs/TESTING.md`.
-
-### Reviewer Quick Verify
-
-Run these commands from repo root:
+### Linux/macOS
 
 ```bash
 ./mvnw test
@@ -268,36 +160,110 @@ MANAGE_APP=1 bash scripts/e2e.sh
 bash scripts/e2e_persistence.sh
 ```
 
-Expected result:
+### Windows (PowerShell + Git Bash)
+
+```powershell
+.\mvnw.cmd test
+.\mvnw.cmd package
+& 'C:\Program Files\Git\bin\bash.exe' scripts/e2e.sh
+$env:MANAGE_APP='1'; & 'C:\Program Files\Git\bin\bash.exe' scripts/e2e.sh
+& 'C:\Program Files\Git\bin\bash.exe' scripts/e2e_persistence.sh
+```
+
+Expected:
 
 - Maven commands finish with `BUILD SUCCESS`
-- E2E scripts print final success messages and exit with code `0`
+- Scripts print success and exit `0`
 
-## 9. Troubleshooting
+## 8. Script Reference
 
-### `Cannot start maven from wrapper`
+- `scripts/e2e.sh`
+  - Main assignment verification.
+  - Covers header validation, admin CRUD, positive/negative rule checks, wildcard semantics, isolation, concurrency, 429 schema/header, audit, and managed restart persistence.
+- `scripts/e2e_persistence.sh`
+  - Focused two-phase restart persistence check (rule + counter).
+- `e2e.sh`
+  - Convenience wrapper for `scripts/e2e.sh`.
 
-Cause: missing `.mvn/wrapper/maven-wrapper.properties`.
+## 9. One-Command Reviewer Check
 
-Fix:
-
-- ensure file exists with valid `distributionUrl`.
-
-### Port already in use
-
-If `8081` is busy, run:
+### Linux/macOS
 
 ```bash
-./mvnw spring-boot:run -Dspring-boot.run.arguments=--server.port=18081
+./mvnw test && ./mvnw package && bash scripts/e2e.sh && MANAGE_APP=1 bash scripts/e2e.sh && bash scripts/e2e_persistence.sh
 ```
 
-### E2E script fails with service unavailable
+### Windows (PowerShell + Git Bash)
 
-- Verify app is running and reachable at `BASE_URL`.
-- If using managed mode, ensure built jar exists in `target/`.
-- On Windows, run scripts from Git Bash/WSL so `bash` and Unix tools are available.
+```powershell
+.\mvnw.cmd test; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+.\mvnw.cmd package; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& 'C:\Program Files\Git\bin\bash.exe' scripts/e2e.sh; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+$env:MANAGE_APP='1'; & 'C:\Program Files\Git\bin\bash.exe' scripts/e2e.sh; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+& 'C:\Program Files\Git\bin\bash.exe' scripts/e2e_persistence.sh; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+```
 
-## 10. Decisions and Tradeoffs
+Expected success lines:
+
+- `All assignment E2E checks passed.`
+- `PASS: Persistence checks across restart`
+- `Persistence checks passed.`
+
+## 10. Scoring Evidence
+
+| Requirement | Proof in code | Proof in tests/scripts |
+|---|---|---|
+| 2 protected endpoints | `src/main/java/com/radix/rate_limit_gateway/api/DataController.java` | `scripts/e2e.sh` GET/POST body checks |
+| required headers + `400` JSON | `src/main/java/com/radix/rate_limit_gateway/ratelimit/HeaderValidationInterceptor.java` | `scripts/e2e.sh` header validation section |
+| middleware enforcement | `src/main/java/com/radix/rate_limit_gateway/config/WebConfig.java` | blocked/allowed behavior in all E2E and integration tests |
+| `429` includes code/rule/retry | `src/main/java/com/radix/rate_limit_gateway/ratelimit/HeaderValidationInterceptor.java` | `scripts/e2e.sh` 429 JSON/header checks |
+| admin CRUD | `src/main/java/com/radix/rate_limit_gateway/admin/AdminLimitsController.java` | `src/test/java/com/radix/rate_limit_gateway/AdminApiHttpIntegrationTests.java` + `scripts/e2e.sh` |
+| persisted rules | `src/main/java/com/radix/rate_limit_gateway/admin/RateLimitRule.java` | restart checks in `scripts/e2e.sh` and `scripts/e2e_persistence.sh` |
+| persisted limiter state | `src/main/java/com/radix/rate_limit_gateway/admin/RateLimitState.java` + `src/main/java/com/radix/rate_limit_gateway/ratelimit/RateLimitService.java` | restart checks expecting `429` after restart in both persistence scripts |
+| blocked audit persistence | `src/main/java/com/radix/rate_limit_gateway/audit/AuditEvent.java` + `src/main/java/com/radix/rate_limit_gateway/ratelimit/RateLimitService.java` | `src/test/java/com/radix/rate_limit_gateway/RateLimitAuditIntegrationTests.java` + `scripts/e2e.sh` audit checks |
+| concurrency correctness | `src/main/java/com/radix/rate_limit_gateway/ratelimit/RateLimitService.java` | `src/test/java/com/radix/rate_limit_gateway/RateLimitWildcardAndConcurrencyTests.java` + `scripts/e2e.sh` |
+| optional S3 | intentionally not implemented | documented in this README and `docs/ASSIGNMENT_TRACEABILITY.md` |
+
+## 11. Configuration
+
+Main environment variables used by scripts:
+
+- `BASE_URL`
+- `TENANT_PREFIX`
+- `MANAGE_APP`
+- `APP_JAR`
+- `APP_PORT`
+- `APP_DB_URL`
+
+App-level settings:
+
+- `app.seed-default-rules.enabled=false` by default
+- Set to `true` to seed demo startup rules
+
+## 12. Troubleshooting
+
+### `bash` not found on Windows
+
+Use Git Bash path explicitly:
+
+```powershell
+& 'C:\Program Files\Git\bin\bash.exe' scripts/e2e.sh
+```
+
+### Port conflict
+
+Run with another port:
+
+```powershell
+.\mvnw.cmd spring-boot:run -Dspring-boot.run.arguments=--server.port=18081
+```
+
+### E2E cannot connect
+
+- Ensure app is up on configured `BASE_URL`.
+- For managed mode, run `package` first so `target/...jar` exists.
+
+## 13. Design Decisions
 
 ### Rate limiting algorithm
 
@@ -305,35 +271,30 @@ Chosen: **Fixed Window**
 
 Why:
 
-- deterministic and easy to test
-- clear persistence model for counters
-- sufficient for assignment scope
+- deterministic behavior
+- straightforward persistence model
+- easy to verify in integration/E2E tests
 
 Tradeoff:
 
-- allows burst near window boundaries (known fixed-window property)
+- allows bursts near window boundaries
 
 ### S3 export
 
-Not implemented. This is optional in assignment. Local audit persistence is fully implemented.
+Not implemented. Optional in assignment.
 
-### Script validation approach
+### Script validation method
 
-Chosen: `curl -s -o /dev/null -w "%{http_code}"`
+Chosen `curl -sS -o /dev/null -w "%{http_code}"` + explicit comparisons for deterministic pass/fail.
 
-Why:
+## 14. Known Limitations
 
-- simple deterministic checks
-- shell-friendly, CI-friendly, easy fail-fast behavior
+- Fixed-window boundary burst behavior.
+- Local DB-backed design; not a multi-node distributed limiter.
+- Admin endpoints intentionally unauthenticated (assignment scope).
+- Optional S3 export not implemented.
 
-## 11. Known Limitations
-
-- Fixed-window algorithm allows boundary bursts around window rollover.
-- Rate-limit state is backed by local DB; this is not a multi-node distributed limiter design.
-- Admin endpoints are intentionally unauthenticated (assignment scope excludes auth).
-- Optional S3 export is not implemented.
-
-## 12. AI Agent & Setup
+## 15. AI Agent & Setup
 
 Agent/tool:
 
@@ -344,37 +305,28 @@ Local setup:
 - OS: Windows (PowerShell)
 - Java: 17 (Temurin)
 - Build tool: Maven Wrapper (`mvnw` / `mvnw.cmd`)
+- Bash runtime for scripts: Git Bash
 
 Working style:
 
-- iterative implementation and verification
-- frequent `mvnw test` runs
-- targeted E2E checks with curl scripts
-- defect-fix loops based on test feedback
+- iterate: implement -> run tests -> inspect failures -> patch -> re-run
+- use targeted E2E checks for behavior-level validation
+- keep assignment traceability doc in sync with implementation
 
-Representative command loop:
+Representative loop:
 
 ```bash
 ./mvnw test
-./mvnw -Dtest=RateLimitWildcardAndConcurrencyTests test
 ./mvnw package
 bash scripts/e2e.sh
 MANAGE_APP=1 bash scripts/e2e.sh
 bash scripts/e2e_persistence.sh
 ```
 
-### Latest Verification Snapshot
+## 16. Additional Docs
 
-Most recent local verification was run on **February 10, 2026**:
-
-- `.\mvnw.cmd test` -> passed (`Tests run: 6, Failures: 0, Errors: 0`)
-- `.\mvnw.cmd package` -> passed (`BUILD SUCCESS`)
-- Repository revision: unavailable in this workspace (no `.git` directory detected).
-
-## 13. Additional Documentation
-
-- `docs/ARCHITECTURE.md` - components, flow, persistence model, constraints
-- `docs/API.md` - endpoint-by-endpoint reference and examples
-- `docs/OPERATIONS.md` - runbook, env vars, restart and deployment notes
-- `docs/TESTING.md` - test catalog and verification strategy
-- `docs/ASSIGNMENT_TRACEABILITY.md` - explicit mapping from assignment clauses to implementation
+- `docs/ARCHITECTURE.md`
+- `docs/API.md`
+- `docs/OPERATIONS.md`
+- `docs/TESTING.md`
+- `docs/ASSIGNMENT_TRACEABILITY.md`
